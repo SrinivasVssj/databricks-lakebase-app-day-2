@@ -139,10 +139,169 @@
     }
     .delete-btn:hover { background: var(--danger); color: #fff; }
     .delete-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    
+    /* Search results styling */
+    .result-item {
+      background: #fafbfe;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 12px;
+      transition: box-shadow 0.15s ease;
+    }
+    .result-item:hover {
+      box-shadow: 0 2px 8px rgba(79, 70, 229, 0.1);
+    }
+    .result-item:last-child { margin-bottom: 0; }
+    
+    .result-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 8px;
+      gap: 12px;
+    }
+    .result-title {
+      font-weight: 600;
+      font-size: 15px;
+      color: var(--text);
+      flex: 1;
+      line-height: 1.4;
+    }
+    .result-score {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--accent);
+      background: rgba(79, 70, 229, 0.1);
+      padding: 4px 8px;
+      border-radius: 6px;
+      white-space: nowrap;
+    }
+    .result-meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .result-meta strong {
+      color: var(--accent);
+    }
+    .result-text {
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.6;
+      margin-top: 8px;
+    }
+    .result-description {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.5;
+      margin-top: 8px;
+    }
+    .result-link {
+      font-size: 12px;
+      color: var(--accent);
+      text-decoration: none;
+      margin-top: 8px;
+      display: inline-block;
+    }
+    .result-link:hover {
+      text-decoration: underline;
+    }
+    .result-sentiment {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .result-sentiment.positive {
+      background: #d1fae5;
+      color: #065f46;
+    }
+    .result-sentiment.negative {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+    .result-sentiment.neutral {
+      background: #e5e7eb;
+      color: #374151;
+    }
+    .no-results {
+      color: var(--muted);
+      text-align: center;
+      padding: 40px 20px;
+      font-size: 14px;
+    }
+    .search-stats {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .filter-group {
+      display: flex;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .filter-group input {
+      flex: 1;
+      margin-top: 0;
+    }
+    h2 {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0 0 8px 0;
+    }
+    h3 {
+      font-size: 15px;
+      font-weight: 600;
+      margin: 20px 0 12px 0;
+      color: var(--text);
+    }
   </style>
 </head>
 <body>
-  <h1>Stock Watchlist</h1>
+  <h1>Stock News & Watchlist</h1>
+  <p class="hint">Search news articles semantically or manage your stock watchlist.</p>
+
+  <!-- Semantic Search Section -->
+  <div class="card">
+    <h2>🔍 Semantic News Search</h2>
+    <p class="hint">Search news articles using natural language. Results are ranked by similarity using vector embeddings.</p>
+    
+    <form id="search-form">
+      <label for="search-prompt">Search query</label>
+      <div class="filter-group">
+        <input type="text" id="search-prompt" name="prompt" placeholder="What news is there about AI and technology?" required>
+        <input type="text" id="ticker-filter" name="ticker" placeholder="Ticker (optional)" style="max-width: 140px;">
+        <input type="number" id="result-limit" name="limit" placeholder="Limit" value="5" min="1" max="50" style="max-width: 100px;">
+      </div>
+      <button type="submit">Search</button>
+    </form>
+
+    <div id="search-result"></div>
+    
+    <div id="search-results-container" style="display: none; margin-top: 20px;">
+      <div class="search-stats" id="search-stats"></div>
+      
+      <!-- AI Summary Section -->
+      <div id="summary-container" style="display: none; margin: 16px 0; padding: 16px; background: #f0f9ff; border-left: 4px solid var(--accent); border-radius: 8px;">
+        <h3 style="margin: 0 0 12px 0; font-size: 14px; font-weight: 600; color: var(--accent);">💡 Summary</h3>
+        <div id="summary-text" style="font-size: 14px; line-height: 1.6; color: var(--text);"></div>
+      </div>
+      
+      <h3 id="documents-header">📄 Documents</h3>
+      <div id="documents-results"></div>
+    </div>
+  </div>
+
+  <!-- Watchlist Management Section -->
+  <h2 style="margin-top: 32px;">💼 Your Watchlist</h2>
   <p class="hint">Enter a single ticker symbol. This sends exactly ONE call to the Massive API to fetch the latest price, then adds it to your watchlist.</p>
 
   <div class="card">
@@ -174,6 +333,159 @@
     const form = document.getElementById("stock-form");
     const resultEl = document.getElementById("result");
     const watchlistBody = document.getElementById("watchlist-body");
+    const searchForm = document.getElementById("search-form");
+    const searchResultEl = document.getElementById("search-result");
+    const searchResultsContainer = document.getElementById("search-results-container");
+    const documentsResults = document.getElementById("documents-results");
+    const searchStats = document.getElementById("search-stats");
+    const documentsHeader = document.getElementById("documents-header");
+    const summaryContainer = document.getElementById("summary-container");
+    const summaryText = document.getElementById("summary-text");
+
+    function getSentimentClass(sentiment) {
+      if (!sentiment) return "neutral";
+      const s = sentiment.toLowerCase();
+      if (s.includes("positive") || s.includes("bullish")) return "positive";
+      if (s.includes("negative") || s.includes("bearish")) return "negative";
+      return "neutral";
+    }
+
+    function generateSummary(query, documents) {
+      // Extract key information from documents
+      const tickers = [...new Set(documents.map(d => d.ticker).filter(Boolean))];
+      const titles = documents.slice(0, 3).map(d => d.title).filter(Boolean);
+      const descriptions = documents.slice(0, 3).map(d => d.description).filter(Boolean);
+      const sentiments = documents.map(d => d.sentiment).filter(Boolean);
+      
+      // Count sentiment distribution
+      const posCount = sentiments.filter(s => s.toLowerCase().includes('positive') || s.toLowerCase().includes('bullish')).length;
+      const negCount = sentiments.filter(s => s.toLowerCase().includes('negative') || s.toLowerCase().includes('bearish')).length;
+      const neuCount = sentiments.length - posCount - negCount;
+      
+      // Build summary
+      let summary = `<strong>Regarding "${query}":</strong><br><br>`;
+      
+      summary += `Found ${documents.length} relevant article${documents.length !== 1 ? 's' : ''}`;
+      if (tickers.length > 0) {
+        summary += ` covering <strong>${tickers.join(', ')}</strong>`;
+      }
+      summary += `. `;
+      
+      // Sentiment summary
+      if (sentiments.length > 0) {
+        const sentimentParts = [];
+        if (posCount > 0) sentimentParts.push(`${posCount} positive`);
+        if (neuCount > 0) sentimentParts.push(`${neuCount} neutral`);
+        if (negCount > 0) sentimentParts.push(`${negCount} negative`);
+        summary += `Sentiment: ${sentimentParts.join(', ')}. `;
+      }
+      
+      // Top headlines
+      if (titles.length > 0) {
+        summary += `<br><br><strong>Key topics:</strong><br>`;
+        titles.forEach((title, i) => {
+          summary += `• ${title}<br>`;
+        });
+      }
+      
+      // Key insights from descriptions
+      if (descriptions.length > 0 && descriptions[0]) {
+        summary += `<br><strong>Highlights:</strong> ${descriptions[0].substring(0, 200)}${descriptions[0].length > 200 ? '...' : ''}`;
+      }
+      
+      return summary;
+    }
+
+    searchForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const prompt = document.getElementById("search-prompt").value;
+      const ticker = document.getElementById("ticker-filter").value.trim().toUpperCase();
+      searchResultEl.textContent = "Searching...";
+      searchResultsContainer.style.display = "none";
+
+      try {
+        const limit = parseInt(document.getElementById("result-limit").value) || 5;
+        const body = { prompt, limit };
+        if (ticker) body.ticker = ticker;
+
+        const resp = await fetch("/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          searchResultEl.textContent = "Error: " + (data.error || resp.statusText);
+          return;
+        }
+        
+        searchResultEl.textContent = "";
+        searchResultsContainer.style.display = "block";
+        
+        // Display stats and header
+        const docCount = data.results_count?.documents || 0;
+        
+        // Update header with "Top k Documents"
+        documentsHeader.textContent = `📄 Top ${limit} Documents`;
+        
+        // Show message if fewer documents available than requested
+        let availabilityMsg = "";
+        if (docCount < limit && docCount > 0) {
+          availabilityMsg = ` <em>(That's all we have - ${docCount} relevant documents available)</em>`;
+        } else if (docCount === 0) {
+          availabilityMsg = ` <em>(No documents found)</em>`;
+        }
+        
+        searchStats.innerHTML = `
+          Found <strong>${docCount}</strong> documents${availabilityMsg}
+          ${data.ticker_filter ? ` for ticker <strong>${data.ticker_filter}</strong>` : ""}
+          • Model: <code>${data.model}</code>
+        `;
+        
+        // Generate and display summary
+        if (docCount > 0 && data.documents && data.documents.length > 0) {
+          summaryContainer.style.display = "block";
+          const summaryContent = generateSummary(prompt, data.documents);
+          summaryText.innerHTML = summaryContent;
+        } else {
+          summaryContainer.style.display = "none";
+        }
+        
+        // Render documents
+        documentsResults.innerHTML = "";
+        if (!data.documents || data.documents.length === 0) {
+          documentsResults.innerHTML = '<div class="no-results">No matching documents found. Try running the embeddings notebook first.</div>';
+        } else {
+          data.documents.forEach((doc) => {
+            const div = document.createElement("div");
+            div.className = "result-item";
+            const score = (doc.similarity_score * 100).toFixed(1);
+            const date = doc.published_utc ? new Date(doc.published_utc).toLocaleDateString() : "Unknown date";
+            const sentiment = doc.sentiment ? `<span class="result-sentiment ${getSentimentClass(doc.sentiment)}">${doc.sentiment}</span>` : "";
+            const description = doc.description ? `<div class="result-description">${doc.description}</div>` : "";
+            const author = doc.author ? `by ${doc.author}` : "";
+            const publisher = doc.publisher_name || "Unknown source";
+            const articleLink = doc.article_url ? `<a href="${doc.article_url}" target="_blank" class="result-link">Read article →</a>` : "";
+            
+            div.innerHTML = `
+              <div class="result-header">
+                <div class="result-title">${doc.title || doc.id}</div>
+                <div class="result-score">${score}%</div>
+              </div>
+              <div class="result-meta">
+                <strong>${doc.ticker}</strong> • ${date} • ${publisher} ${author ? `• ${author}` : ""}
+                ${sentiment}
+              </div>
+              ${description}
+              ${articleLink}
+            `;
+            documentsResults.appendChild(div);
+          });
+        }
+      } catch (err) {
+        searchResultEl.textContent = "Search failed: " + err;
+      }
+    });
 
     async function loadWatchlist() {
       try {

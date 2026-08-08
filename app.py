@@ -19,6 +19,7 @@ from flask import Flask, jsonify, render_template, request
 
 import lakebase
 from massive_client import MassiveClient
+from sentence_transformers import SentenceTransformer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("massive-app")
@@ -29,6 +30,9 @@ _w = WorkspaceClient()
 TABLE_NAME = os.environ.get("MASSIVE_TABLE_NAME", "massive_records")
 WATCHLIST_TABLE_NAME = os.environ.get("WATCHLIST_TABLE_NAME", "watchlist")
 NEWS_TABLE_NAME = os.environ.get("NEWS_TABLE_NAME", "ticker_news_documents")
+EMBEDDINGS_TABLE_NAME = os.environ.get("EMBEDDINGS_TABLE_NAME", "ticker_news_embeddings")
+CHUNK_EMBEDDINGS_TABLE_NAME = os.environ.get("CHUNK_EMBEDDINGS_TABLE_NAME", "ticker_news_chunk_embeddings")
+EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 # Tickers to fetch news for by default (comma-separated), e.g. "AAPL,MSFT,GOOGL"
 DEFAULT_NEWS_TICKERS = [
@@ -41,6 +45,26 @@ DEFAULT_NEWS_TICKERS = [
 # ".X" or ".XX" share-class suffix (e.g. "BRK.B"). This rejects obviously
 # malformed input before we even call the Massive API.
 _TICKER_RE = re.compile(r"^[A-Z]{1,10}(\.[A-Z]{1,2})?$")
+
+# Lazy-loaded embedding model (cached after first use)
+_embedding_model = None
+
+
+def get_embedding_model():
+    """
+    Lazy-load the sentence transformer model for generating query embeddings.
+    The model is cached in memory after the first call to avoid repeated
+    loading overhead (~3-5 seconds per load).
+    
+    Returns:
+        SentenceTransformer: The loaded embedding model
+    """
+    global _embedding_model
+    if _embedding_model is None:
+        logger.info(f"Loading embedding model: {EMBEDDING_MODEL_NAME}")
+        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        logger.info("Embedding model loaded successfully")
+    return _embedding_model
 
 
 def ensure_table():
@@ -284,6 +308,174 @@ def delete_from_watchlist(symbol: str):
         return jsonify({"error": f"{symbol} is not on your watchlist"}), 404
 
     return jsonify({"symbol": symbol, "email": email, "deleted": True})
+
+
+@app.route("/search", methods=["POST"])
+def vector_search():
+    """
+    Semantic search over news documents and chunks using vector similarity.
+    
+    Searches BOTH document-level and chunk-level embeddings tables,
+    and enriches results with full article metadata from ticker_news_documents.
+    
+    Body (JSON): {
+        "prompt": "What news is there about AI?",
+        "limit": 10,
+        "ticker": "AAPL" (optional - filter by ticker)
+    }
+    Returns: {
+        "documents": [...],  # Full articles with metadata
+        "chunks": [...]      # Specific passages with context
+    }
+    """
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+    
+    prompt = request.json.get("prompt", "").strip()
+    if not prompt:
+        return jsonify({"error": "'prompt' field is required"}), 400
+    
+    limit = int(request.json.get("limit", 10))
+    if limit < 1 or limit > 100:
+        return jsonify({"error": "'limit' must be between 1 and 100"}), 400
+    
+    ticker_filter = request.json.get("ticker", "").strip().upper()
+    
+    try:
+        # Generate embedding for the search prompt
+        model = get_embedding_model()
+        query_embedding = model.encode(prompt)
+        
+        # Convert to list for PostgreSQL
+        embedding_list = query_embedding.tolist()
+        embedding_str = "[" + ",".join(str(x) for x in embedding_list) + "]"
+        
+        # Search document-level embeddings WITH full article metadata
+        doc_query = f"""
+        SELECT 
+            e.id,
+            e.ticker,
+            e.title,
+            e.published_utc,
+            d.description,
+            d.author,
+            d.article_url,
+            d.publisher_name,
+            d.sentiment,
+            d.sentiment_reasoning,
+            1 - (e.embedding <=> %s::vector) AS similarity_score
+        FROM {EMBEDDINGS_TABLE_NAME} e
+        LEFT JOIN {NEWS_TABLE_NAME} d ON e.id = d.id
+        """
+        
+        doc_params = [embedding_str]
+        if ticker_filter:
+            doc_query += " WHERE e.ticker = %s"
+            doc_params.append(ticker_filter)
+        
+        doc_query += f"""
+        ORDER BY e.embedding <=> %s::vector
+        LIMIT %s
+        """
+        doc_params.extend([embedding_str, limit])
+        
+        documents = lakebase.run_query(doc_query, tuple(doc_params))
+        
+        # Search chunk-level embeddings
+        chunk_query = f"""
+        SELECT 
+            c.id,
+            c.article_id,
+            c.ticker,
+            c.chunk_index,
+            c.chunk_text,
+            d.title AS article_title,
+            d.published_utc,
+            d.article_url,
+            1 - (c.embedding <=> %s::vector) AS similarity_score
+        FROM {CHUNK_EMBEDDINGS_TABLE_NAME} c
+        LEFT JOIN {NEWS_TABLE_NAME} d ON c.article_id = d.id
+        """
+        
+        chunk_params = [embedding_str]
+        if ticker_filter:
+            chunk_query += " WHERE c.ticker = %s"
+            chunk_params.append(ticker_filter)
+        
+        chunk_query += f"""
+        ORDER BY c.embedding <=> %s::vector
+        LIMIT %s
+        """
+        chunk_params.extend([embedding_str, limit])
+        
+        chunks = lakebase.run_query(chunk_query, tuple(chunk_params))
+        
+        return jsonify({
+            "prompt": prompt,
+            "ticker_filter": ticker_filter or None,
+            "documents": documents,
+            "chunks": chunks,
+            "model": EMBEDDING_MODEL_NAME,
+            "results_count": {
+                "documents": len(documents),
+                "chunks": len(chunks)
+            }
+        })
+        
+    except Exception as e:
+        logger.exception("Vector search failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/search/stats", methods=["GET"])
+def search_stats():
+    """
+    Get statistics about the embeddings tables - useful for debugging
+    and understanding what data is available for search.
+    """
+    try:
+        # Count documents
+        doc_count = lakebase.run_query(
+            f"SELECT COUNT(*) as count FROM {EMBEDDINGS_TABLE_NAME}"
+        )[0].get("count", 0)
+        
+        # Count chunks
+        chunk_count = lakebase.run_query(
+            f"SELECT COUNT(*) as count FROM {CHUNK_EMBEDDINGS_TABLE_NAME}"
+        )[0].get("count", 0)
+        
+        # Get tickers with embeddings
+        tickers = lakebase.run_query(
+            f"""
+            SELECT DISTINCT ticker, COUNT(*) as doc_count
+            FROM {EMBEDDINGS_TABLE_NAME}
+            GROUP BY ticker
+            ORDER BY ticker
+            """
+        )
+        
+        # Get date range
+        date_range = lakebase.run_query(
+            f"""
+            SELECT 
+                MIN(published_utc) as earliest,
+                MAX(published_utc) as latest
+            FROM {EMBEDDINGS_TABLE_NAME}
+            WHERE published_utc IS NOT NULL
+            """
+        )
+        
+        return jsonify({
+            "total_documents": doc_count,
+            "total_chunks": chunk_count,
+            "tickers": tickers,
+            "date_range": date_range[0] if date_range else {},
+            "model": EMBEDDING_MODEL_NAME
+        })
+        
+    except Exception as e:
+        logger.exception("Failed to get search stats")
+        return jsonify({"error": str(e)}), 500
 
 
 def _extract_latest_price(data: dict) -> float | None:
